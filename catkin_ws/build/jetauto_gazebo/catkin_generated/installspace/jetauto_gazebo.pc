@@ -1,0 +1,8 @@
+prefix=/home/annie/DRL-robot-navigation/catkin_ws/install
+
+Name: jetauto_gazebo
+Description: Description of jetauto_gazebo
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

@@ -1,0 +1,9 @@
+controller_joint_names: ['', 'joint1', 'joint2', 'joint3', 'joint4', 'r_joint', 'l_joint', 'r_in_joint', 'r_out_joint', 'l_in_joint', 'l_out_joint', ]
+
+  /gazebo_ros_control:
+    pid_gains:
+      joint1:
+        p: 100.0
+        i: 0.01
+        d: 10.0
+

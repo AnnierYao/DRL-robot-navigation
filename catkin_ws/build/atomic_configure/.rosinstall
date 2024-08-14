@@ -1,0 +1,2 @@
+- setup-file:
+    local-name: /home/annie/DRL-robot-navigation/catkin_ws/devel/setup.sh

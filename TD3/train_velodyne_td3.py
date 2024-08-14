@@ -11,6 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from replay_buffer import ReplayBuffer
 from velodyne_env import GazeboEnv
 
+writer = SummaryWriter()
 
 def evaluate(network, epoch, eval_episodes=10):
     avg_reward = 0.0
@@ -35,6 +36,8 @@ def evaluate(network, epoch, eval_episodes=10):
         % (eval_episodes, epoch, avg_reward, avg_col)
     )
     print("..............................................")
+    writer.add_scalar('test/reward', avg_reward, epoch)
+    writer.add_scalar('test/collision', avg_col, epoch) 
     return avg_reward
 
 
@@ -103,7 +106,7 @@ class TD3(object):
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters())
 
         self.max_action = max_action
-        self.writer = SummaryWriter()
+        # self.writer = SummaryWriter()
         self.iter_count = 0
 
     def get_action(self, state):
@@ -199,9 +202,9 @@ class TD3(object):
             av_loss += loss
         self.iter_count += 1
         # Write new values for tensorboard
-        self.writer.add_scalar("loss", av_loss / iterations, self.iter_count)
-        self.writer.add_scalar("Av. Q", av_Q / iterations, self.iter_count)
-        self.writer.add_scalar("Max. Q", max_Q, self.iter_count)
+        writer.add_scalar("loss", av_loss / iterations, self.iter_count)
+        writer.add_scalar("Av. Q", av_Q / iterations, self.iter_count)
+        writer.add_scalar("Max. Q", max_Q, self.iter_count)
 
     def save(self, filename, directory):
         torch.save(self.actor.state_dict(), "%s/%s_actor.pth" % (directory, filename))
@@ -218,7 +221,8 @@ class TD3(object):
 
 # Set the parameters for the implementation
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # cuda or cpu
-seed = 0  # Random seed number
+# device = torch.device("cpu")
+seed = 1  # Random seed number
 eval_freq = 5e3  # After how many steps to perform the evaluation
 max_ep = 500  # maximum number of steps per episode
 eval_ep = 10  # number of episodes for evaluation
@@ -245,14 +249,19 @@ if not os.path.exists("./results"):
     os.makedirs("./results")
 if save_model and not os.path.exists("./pytorch_models"):
     os.makedirs("./pytorch_models")
+if save_model and not os.path.exists("./models"):
+    os.makedirs("./models")
 
 # Create the training environment
 environment_dim = 20
 robot_dim = 4
 env = GazeboEnv("multi_robot_scenario.launch", environment_dim)
 time.sleep(5)
+
 torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
 np.random.seed(seed)
+
 state_dim = environment_dim + robot_dim
 action_dim = 2
 max_action = 1
@@ -277,6 +286,12 @@ timesteps_since_eval = 0
 episode_num = 0
 done = True
 epoch = 1
+episode_reward = 0
+episode_timesteps = 0
+target = False
+total_reward = 0
+target_reached = 0
+col_total = 0
 
 count_rand_actions = 0
 random_action = []
@@ -307,6 +322,14 @@ while timestep < max_timesteps:
             network.save(file_name, directory="./pytorch_models")
             np.save("./results/%s" % (file_name), evaluations)
             epoch += 1
+
+        target_reached += int(target)
+        total_reward += episode_reward
+        writer.add_scalar('train/avg_reward', total_reward/(episode_num+1), timestep)
+        writer.add_scalar('train/steps', episode_timesteps, episode_num)
+        writer.add_scalar('train/success', target_reached/(episode_num+1), episode_num)
+        writer.add_scalar('train/collision', col_total/(episode_num+1), episode_num)
+        print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}, done:{}".format(episode_num, timestep, episode_timesteps, round(episode_reward, 2), int(target)))
 
         state = env.reset()
         done = False
@@ -347,6 +370,8 @@ while timestep < max_timesteps:
     done_bool = 0 if episode_timesteps + 1 == max_ep else int(done)
     done = 1 if episode_timesteps + 1 == max_ep else int(done)
     episode_reward += reward
+    if reward < -90:
+        col_total += 1
 
     # Save the tuple in replay buffer
     replay_buffer.add(state, action, reward, done_bool, next_state)

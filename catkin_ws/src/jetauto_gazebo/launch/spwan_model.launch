@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<launch>
+    <!--机器命名空间-->
+    <arg name="robot_name"      default="JetAuto" />
+    <arg name="machine_type"    default="JetAuto"/>
+    <arg      if="$(eval robot_name == '/')"    name="frame_prefix" default=""/>
+    <arg unless="$(eval robot_name == '/')"     name="frame_prefix" default="$(arg robot_name)/"/>
+    <arg      if="$(eval robot_name == '/')"    name="tf_prefix" default=""/>
+    <arg unless="$(eval robot_name == '/')"     name="tf_prefix" default="$(arg robot_name)"/>
+
+    <arg name="odom_frame"          default="odom"/>
+    <arg name="base_frame"          default="base_footprint"/>
+    <arg name="lidar_frame"         default="lidar_sim_frame"/>
+    <arg name="imu_frame"           default="imu_frame"/>
+
+    <arg name="initial_x"       default="0.0"/>
+    <arg name="initial_y"       default="0.0"/>
+    <arg name="initial_z"       default="0.0"/>
+    <arg name="initial_Y"       default="0.0"/>
+
+    <!--
+    <rosparam param="/gazebo_ros_control/pid_gains/joint1">
+        p: 100.0
+        i: 0.01 
+        d: 10.0
+    </rosparam>
+    -->
+
+
+    <!-- send robot urdf to param server -->
+    <param name="robot_description" command="$(find xacro)/xacro '$(find jetauto_description)/urdf/jetauto.gazebo.xacro'"/>
+    <!-- push robot_description to factory and spawn robot in gazebo at the origin, change x,y,z arguments to spawn in a different position -->
+    <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model" args="-urdf -param robot_description -model $(arg robot_name) -x $(arg initial_x) -y $(arg initial_y) -z $(arg initial_z) -Y $(arg initial_Y) -J joint1 0" respawn="false" output="screen" />
+
+    <node pkg="joint_state_publisher" type="joint_state_publisher" name="joint_state_publisher" >
+        <param name="tf_prefix" value="$(arg tf_prefix)" />
+    </node>
+
+    <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher">
+      <param name="publish_frequency" type="double" value="30.0"/>
+      <!--<param name="tf_prefix" type="string" value="$(arg robot_name)"/>-->
+    </node>
+</launch>
