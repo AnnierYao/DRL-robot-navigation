@@ -246,7 +246,7 @@ policy_noise = 0.2  # Added noise for exploration
 noise_clip = 0.5  # Maximum clamping values of the noise
 policy_freq = 2  # Frequency of Actor network updates
 buffer_size = 1e6  # Maximum size of the buffer
-file_name = "TD3_velodyne"  # name of the file to store the policy
+file_name = "TD3_rplidar_LLM"  # name of the file to store the policy
 save_model = True  # Weather to save the model or not
 load_model = False  # Weather to load a stored model
 random_near_obstacle = True  # To take random actions near obstacles or not
@@ -344,36 +344,34 @@ while timestep < max_timesteps:
             writer.add_scalar('train/success', target_reached/(episode_num+1), episode_num)
             writer.add_scalar('train/collision', col_total/(episode_num+1), episode_num)
             print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}, done:{}".format(episode_num, timestep, episode_timesteps, round(episode_reward, 2), int(target)))
-            # print(state_sequnce)
-            # print('length:', len(state_sequnce))
-            # print(info['goal_x'], info['goal_y'])
-            if not (target and episode_timesteps>1):
-                # with open('data.txt', 'w') as file:
-                #     np.savetxt(file, state_sequnce, fmt='%f')
-                # print('goal:', info['goal_x'], info['goal_y'])
-                if len(state_sequnce) > 50:
-                    state_sequnce = state_sequnce[-50:]
-                    odom_sequnce = odom_sequnce[-50:]
-                new_goal_x, new_goal_y = predictor.get_new_goal(info['goal_x'], info['goal_y'], state_sequnce, odom_sequnce)
-                env.publish_last_new_markers(new_goal_x, new_goal_y)
 
-                for i in range(episode_timesteps):
-                    # 获取当前 episode 的 transition
-                    # print('start:', replay_buffer.episode_start_indices)
-                    # print('i:', i)
-                    old_state, old_action, old_reward, old_done_bool, old_done, old_next_state = replay_buffer.get_last_episode(i)
-                    # print('length:', replay_buffer.size())
+            # if not (target and episode_timesteps>1):
+            #     # with open('data.txt', 'w') as file:
+            #     #     np.savetxt(file, state_sequnce, fmt='%f')
+            #     # print('goal:', info['goal_x'], info['goal_y'])
+            #     if len(state_sequnce) > 50:
+            #         state_sequnce = state_sequnce[-50:]
+            #         odom_sequnce = odom_sequnce[-50:]
+            #     new_goal_x, new_goal_y = predictor.get_new_goal(info['goal_x'], info['goal_y'], state_sequnce, odom_sequnce)
+            #     env.publish_last_new_markers(new_goal_x, new_goal_y)
 
-                    # 重新计算 reward 和 state
-                    new_state, new_reward, new_target = env.calculate_reward_and_state(old_state, new_goal_x, new_goal_y)
-                    new_next_state, _, _ = env.calculate_reward_and_state(old_next_state, new_goal_x, new_goal_y)
-                    # print('new_next_state:', np.shape(next_state))
+            #     for i in range(episode_timesteps):
+            #         # 获取当前 episode 的 transition
+            #         # print('start:', replay_buffer.episode_start_indices)
+            #         # print('i:', i)
+            #         old_state, old_action, old_reward, old_done_bool, old_done, old_next_state = replay_buffer.get_last_episode(i)
+            #         # print('length:', replay_buffer.size())
 
-                    new_done = 1 if new_target else int(old_done)
-                    new_done_bool = 1 if new_target else int(old_done_bool)
+            #         # 重新计算 reward 和 state
+            #         new_state, new_reward, new_target = env.calculate_reward_and_state(old_state, new_goal_x, new_goal_y)
+            #         new_next_state, _, _ = env.calculate_reward_and_state(old_next_state, new_goal_x, new_goal_y)
+            #         # print('new_next_state:', np.shape(next_state))
 
-                    # 更新 replay buffer 中的 transition
-                    replay_buffer.update_last_episode(i, new_state, old_action, new_reward, new_done_bool, new_done, new_next_state)
+            #         new_done = 1 if new_target else int(old_done)
+            #         new_done_bool = 1 if new_target else int(old_done_bool)
+
+            #         # 更新 replay buffer 中的 transition
+            #         replay_buffer.update_last_episode(i, new_state, old_action, new_reward, new_done_bool, new_done, new_next_state)
 
         
         state_sequnce = []
