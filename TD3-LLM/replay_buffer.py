@@ -18,8 +18,8 @@ class ReplayBuffer(object):
         self.current_episode_start_idx = 0  # 新增，当前 episode 的起始索引
         random.seed(random_seed)
 
-    def add(self, s, a, r, terminate, done, next_state):
-        experience = (s, a, r, terminate, done, next_state)
+    def add(self, s, a, r, terminate, done, next_state, odom_x, odom_y, angle, goal_x, goal_y):
+        experience = (s, a, r, terminate, done, next_state, odom_x, odom_y, angle, goal_x, goal_y)
         if self.count < self.buffer_size:
             self.buffer.append(experience)
             self.count += 1
@@ -65,7 +65,7 @@ class ReplayBuffer(object):
 
         return self.buffer[start_idx + i]
 
-    def update_last_episode(self, i, s, a, r, terminate, done, next_state):
+    def update_last_episode(self, i, s, a, r, terminate, done, next_state, odom_x, odom_y, angle, goal_x, goal_y):
         if not self.episode_start_indices:
             raise ValueError("No episode data in buffer")
 
@@ -75,7 +75,8 @@ class ReplayBuffer(object):
         if start_idx + i >= self.count:
             raise IndexError("Index out of bounds for the last episode")
 
-        self.buffer[start_idx + i] = (s, a, r, terminate, done, next_state)
+        self.buffer[start_idx + i] = (s, a, r, terminate, done, next_state, odom_x, odom_y, angle, goal_x, goal_y)
+        # print("Updated last episode at index:", start_idx + i)
 
     def clear(self):
         self.buffer.clear()

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from numpy import inf
 from torch.utils.tensorboard import SummaryWriter
 
-from replay_buffer import ReplayBuffer
+from replay_buffer_her import ReplayBuffer
 from velodyne_env import GazeboEnv
 from gpt_feedback import GoalPredictor
 
@@ -231,9 +231,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # cuda or
 # device = torch.device("cpu")
 seed = 1  # Random seed number
 eval_freq = 5e3  # After how many steps to perform the evaluation
+start_steps = 1e4  # Number of steps to perform the evaluation
 max_ep = 500  # maximum number of steps per episode
 eval_ep = 10  # number of episodes for evaluation
-max_timesteps = 1e5  # Maximum number of steps to perform
+max_timesteps = 2e6  # Maximum number of steps to perform
 expl_noise = 1  # Initial exploration noise starting value in range [expl_min ... 1]
 expl_decay_steps = (
     500000  # Number of steps over which the initial exploration noise will decay over
@@ -246,10 +247,12 @@ policy_noise = 0.2  # Added noise for exploration
 noise_clip = 0.5  # Maximum clamping values of the noise
 policy_freq = 2  # Frequency of Actor network updates
 buffer_size = 1e6  # Maximum size of the buffer
-file_name = "TD3_rplidar_LLM"  # name of the file to store the policy
+file_name = "TD3_velodyne_her"  # name of the file to store the policy
 save_model = True  # Weather to save the model or not
 load_model = False  # Weather to load a stored model
 random_near_obstacle = True  # To take random actions near obstacles or not
+use_LLM_HER = False  # Weather to use LLM HER or not
+use_HER = True  # Weather to use HER or not
 
 # Create the network storage folders
 if not os.path.exists("./results"):
@@ -302,7 +305,7 @@ col_total = 0
 
 count_rand_actions = 0
 random_action = []
-info = {'odom_x': 0, 'odom_y': 0, 'goal_x': 0, 'goal_y': 0}
+# info = {'odom_x': 0, 'odom_y': 0, 'goal_x': 0, 'goal_y': 0}
 state_sequnce = []
 odom_sequnce = []
 
@@ -325,7 +328,7 @@ while timestep < max_timesteps:
                 policy_freq,
             )
 
-        if timesteps_since_eval >= eval_freq:
+        if (timesteps_since_eval >= eval_freq) and (timestep >= start_steps):
             print("Validating")
             timesteps_since_eval %= eval_freq
             evaluations.append(
@@ -345,42 +348,61 @@ while timestep < max_timesteps:
             writer.add_scalar('train/collision', col_total/(episode_num+1), episode_num)
             print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}, done:{}".format(episode_num, timestep, episode_timesteps, round(episode_reward, 2), int(target)))
 
-            # if not (target and episode_timesteps>1):
-            #     # with open('data.txt', 'w') as file:
-            #     #     np.savetxt(file, state_sequnce, fmt='%f')
-            #     # print('goal:', info['goal_x'], info['goal_y'])
-            #     if len(state_sequnce) > 50:
-            #         state_sequnce = state_sequnce[-50:]
-            #         odom_sequnce = odom_sequnce[-50:]
-            #     new_goal_x, new_goal_y = predictor.get_new_goal(info['goal_x'], info['goal_y'], state_sequnce, odom_sequnce)
-            #     env.publish_last_new_markers(new_goal_x, new_goal_y)
+            if not target and episode_timesteps>1 and np.random.uniform(0, 1) < 0.5 and episode_num < 200 and use_LLM_HER:
+                # with open('data.txt', 'w') as file:
+                #     np.savetxt(file, state_sequnce, fmt='%f')
+                # print('goal:', info['goal_x'], info['goal_y'])
+                # if len(state_sequnce) > 50:
+                    # state_sequnce = state_sequnce[-50:]
+                    # odom_sequnce = odom_sequnce[-50:]
+                if len(odom_state_sequence) > 50:
+                    odom_state_sequence = odom_state_sequence[-50:]
 
-            #     for i in range(episode_timesteps):
-            #         # 获取当前 episode 的 transition
-            #         # print('start:', replay_buffer.episode_start_indices)
-            #         # print('i:', i)
-            #         old_state, old_action, old_reward, old_done_bool, old_done, old_next_state = replay_buffer.get_last_episode(i)
-            #         # print('length:', replay_buffer.size())
+                if info['collision']:
+                    reason = 'collision. The collision point is ({}, {})'.format(info['collision_point'][0], info['collision_point'][1])
+                elif episode_timesteps > 499:
+                    reason = 'timeout'
+                
+                # new_goal_x, new_goal_y = predictor.get_new_goal(info['goal_x'], info['goal_y'], state_sequnce, odom_sequnce)
+                new_goal_x, new_goal_y = predictor.get_new_goal(info['goal_x'], info['goal_y'], reason, odom_state_sequence)
+                # print('new goal:', new_goal_x, new_goal_y)
+                # print('old goal:', info['goal_x'], info['goal_y'])
+                # print(new_goal_x != info['goal_x'], new_goal_y != info['goal_y'])
 
-            #         # 重新计算 reward 和 state
-            #         new_state, new_reward, new_target = env.calculate_reward_and_state(old_state, new_goal_x, new_goal_y)
-            #         new_next_state, _, _ = env.calculate_reward_and_state(old_next_state, new_goal_x, new_goal_y)
-            #         # print('new_next_state:', np.shape(next_state))
+                if new_goal_x != info['goal_x'] or new_goal_y != info['goal_y']:
+                    env.perturb_goal(new_goal_x, new_goal_y, state[:-4])
+                    env.publish_last_old_markers(info['goal_x'], info['goal_y'])
+                    env.publish_last_new_markers(new_goal_x, new_goal_y)
+                    print('new goal generated.')
+                    for i in range(episode_timesteps):
+                        # 获取当前 episode 的 transition
+                        # print('start:', replay_buffer.episode_start_indices)
+                        # print('i:', i)
+                        old_state, old_action, old_reward, old_done_bool, old_done, old_next_state, odom_x, odom_y, angle, goal_x, goal_y = replay_buffer.get_last_episode(i)
+                        # print('length:', replay_buffer.size(), 'steps:', episode_timesteps)
 
-            #         new_done = 1 if new_target else int(old_done)
-            #         new_done_bool = 1 if new_target else int(old_done_bool)
+                        # 重新计算 reward 和 state
+                        new_state, new_reward, new_target = env.calculate_reward_and_state(old_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
+                        new_next_state, _, _ = env.calculate_reward_and_state(old_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
+                        # print('new_next_state:', np.shape(next_state))
 
-            #         # 更新 replay buffer 中的 transition
-            #         replay_buffer.update_last_episode(i, new_state, old_action, new_reward, new_done_bool, new_done, new_next_state)
+                        new_done = 1 if new_target else int(old_done)
+                        new_done_bool = 1 if new_target else int(old_done_bool)
+
+                        # 更新 replay buffer 中的 transition
+                        replay_buffer.update_last_episode(i, new_state, old_action, new_reward, new_done_bool, new_done, new_next_state)
+                        # replay_buffer.add(new_state, old_action, new_reward, new_done_bool, new_done, new_next_state)
 
         
-        state_sequnce = []
-        odom_sequnce = []
+        # state_sequnce = []
+        # odom_sequnce = []
+        odom_state_sequence = []
         state, info = env.reset()
         # print('shape:', np.shape(state))
         #print(state)
         done = False
-        state_sequnce.append(state)
+        # state_sequnce.append(state)
+        odom_state_sequence.append(info['odom_state'])
 
         episode_reward = 0
         episode_timesteps = 0
@@ -422,14 +444,18 @@ while timestep < max_timesteps:
     episode_reward += reward
     if reward < -90:
         col_total += 1
+        collision = True
+    else:
+        collision = False
 
     # Save the tuple in replay buffer
-    replay_buffer.add(state, action, reward, done_bool, done, next_state)
+    replay_buffer.add(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'] , info['angle'], info["goal_x"], info["goal_y"])
 
     # Update the counters
     state = next_state
-    state_sequnce.append(state.flatten().tolist())
-    odom_sequnce.append(np.round(np.array([float(info['odom_x']), float(info['odom_y'])]),4))
+    # state_sequnce.append(state.flatten().tolist())
+    # odom_sequnce.append(np.round(np.array([float(info['odom_x']), float(info['odom_y'])]),4))
+    odom_state_sequence.append(info['odom_state'])
     episode_timesteps += 1
     timestep += 1
     timesteps_since_eval += 1
