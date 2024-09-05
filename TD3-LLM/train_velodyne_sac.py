@@ -8,18 +8,63 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
 from numpy import inf
+import datetime
 from torch.utils.tensorboard import SummaryWriter
 
-from replay_buffer import ReplayBuffer
-from velodyne_env import GazeboEnv
-from gpt_feedback import GoalPredictor
 
-writer = SummaryWriter()
+# Set the parameters for the implementation
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # cuda or cpu
+# device = torch.device("cpu")
+seed = 1  # Random seed number
+eval_freq = 1e3  # After how many steps to perform the evaluation
+start_steps = 1e4  # Number of steps to perform the evaluation
+max_ep = 1000  # maximum number of steps per episode
+eval_ep = 10  # number of episodes for evaluation
+max_timesteps = 5e5  # Maximum number of steps to perform
+expl_noise = 1  # Initial exploration noise starting value in range [expl_min ... 1]
+expl_decay_steps = (
+    500000  # Number of steps over which the initial exploration noise will decay over
+)
+expl_min = 0.1  # Exploration noise after the decay in range [0...expl_noise]
+batch_size = 40  # Size of the mini-batch
+discount = 0.99999  # Discount factor to calculate the discounted future reward (should be close to 1)
+tau = 0.005  # Soft target update variable (should be close to 0)
+policy_noise = 0.2  # Added noise for exploration
+noise_clip = 0.5  # Maximum clamping values of the noise
+policy_freq = 2  # Frequency of Actor network updates
+buffer_size = 1e6  # Maximum size of the buffer
+name = "SAC_velodyne"  # name of the file to store the policy
+save_model = True  # Weather to save the model or not
+load_model = False  # Weather to load a stored model
+random_near_obstacle = True  # To take random actions near obstacles or not
+reward_type = 'hybird'  # Reward type, sparse or dense
+env_name = "MazeEnv"  # Environment name
+from velodyne_env_maze import GazeboEnv
+# from rplidar_env import GazeboEnv
+use_LLM_HER = True # Weather to use LLM HER or not
+feedback_form = 'goal'  # Feedback form for the HER algorithm
+from gpt_feedback import GoalPredictor
+use_HER = False  # Weather to use HER or not
+from replay_buffer import ReplayBuffer
+lr = 0.001  # Learning rate for the networks
+alpha = 0.2  # Alpha value for the SAC algorithm
+
+
+file_name = '{}_{}_{}_{}_{}_{}_{}'.format(name, reward_type, feedback_form, env_name,
+                                                    datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), 
+                                                    "HER" if use_HER else "", 
+                                                    "LLM_HER" if use_LLM_HER else "")
+result_path = './runs/' + file_name
+writer = SummaryWriter(result_path)
 
 api_base = "https://eastusengine.openai.azure.com/"
 api_key = '9ae06f2709144320b0b4645c587a3492'
-deployment_name = 'gpt-4o-mini'
+deployment_name = 'gpt-4o-2'
 api_version = '2023-03-15-preview'
+# api_base = "https://eastusengine.openai.azure.com/"
+# api_key = '9ae06f2709144320b0b4645c587a3492'
+# deployment_name = 'gpt-4o-mini'
+# api_version = '2023-03-15-preview'
 
 LOG_SIG_MAX = 2
 LOG_SIG_MIN = -20
@@ -28,6 +73,7 @@ epsilon = 1e-6
 def evaluate(network, epoch, eval_episodes=10):
     avg_reward = 0.0
     col = 0
+    success = 0
     for _ in range(eval_episodes):
         count = 0
         state, info = env.reset()
@@ -35,21 +81,25 @@ def evaluate(network, epoch, eval_episodes=10):
         while not done and count < 501:
             action = network.get_action(np.array(state))
             a_in = [(action[0] + 1) / 2, action[1]]
-            state, reward, done, _, info = env.step(a_in)
+            state, reward, done, target, info = env.step(a_in)
             avg_reward += reward
             count += 1
-            if reward < -90:
+            if target:
+                success += 1   
+            if info['collision']:
                 col += 1
     avg_reward /= eval_episodes
     avg_col = col / eval_episodes
+    avg_success = success / eval_episodes   
     print("..............................................")
     print(
-        "Average Reward over %i Evaluation Episodes, Epoch %i: %f, %f"
-        % (eval_episodes, epoch, avg_reward, avg_col)
+        "Average Reward over %i Evaluation Episodes, Epoch %i: %f, %f, success rate: %f"
+        % (eval_episodes, epoch, avg_reward, avg_col, avg_success)
     )
     print("..............................................")
     writer.add_scalar('test/reward', avg_reward, epoch)
     writer.add_scalar('test/collision', avg_col, epoch) 
+    writer.add_scalar('test/success', avg_success, epoch)   
     return avg_reward
 
 # Initialize Policy weights
@@ -223,20 +273,19 @@ class SAC(object):
             policy_loss.backward()
             self.policy_optim.step()
 
-            alpha_loss = -(self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
+            # alpha_loss = -(self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
 
-            self.alpha_optim.zero_grad()
-            alpha_loss.backward()
-            self.alpha_optim.step()
-
-            self.alpha = self.log_alpha.exp()
-            alpha_tlogs = self.alpha.clone() # For TensorboardX logs
+            # self.alpha_optim.zero_grad()
+            # alpha_loss.backward()
+            # self.alpha_optim.step()
+            # self.alpha = self.log_alpha.exp()
+            # alpha_tlogs = self.alpha.clone() # For TensorboardX logs
 
             self.soft_update(self.critic_target, self.critic, tau)
 
 
             av_loss += policy_loss.item()
-            av_alpha_loss += alpha_loss.item()
+            # av_alpha_loss += alpha_loss.item()
         self.iter_count += 1
         # Write new values for tensorboard
         writer.add_scalar("loss", av_loss / iterations, self.iter_count)
@@ -246,7 +295,7 @@ class SAC(object):
         writer.add_scalar('loss/critic_1', qf1_loss.item(), self.iter_count)
         writer.add_scalar('loss/critic_2', qf2_loss.item(), self.iter_count)
         writer.add_scalar('loss/avg_entropy_loss', av_alpha_loss/iterations, self.iter_count)
-        writer.add_scalar('entropy_temprature/alpha', alpha_tlogs.item(), self.iter_count)
+        # writer.add_scalar('entropy_temprature/alpha', alpha_tlogs.item(), self.iter_count)
 
     def save(self, filename, directory):
         # 保存 actor, critic, 和 temperature 参数
@@ -266,35 +315,6 @@ class SAC(object):
         self.policy_optim.load_state_dict(torch.load(f"{directory}/{filename}_policy_optim.pth"))
 
 
-# Set the parameters for the implementation
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # cuda or cpu
-# device = torch.device("cpu")
-seed = 1  # Random seed number
-eval_freq = 5e3  # After how many steps to perform the evaluation
-start_steps = 1e4  # Number of steps to perform the evaluation
-max_ep = 500  # maximum number of steps per episode
-eval_ep = 10  # number of episodes for evaluation
-max_timesteps = 2e6  # Maximum number of steps to perform
-expl_noise = 1  # Initial exploration noise starting value in range [expl_min ... 1]
-expl_decay_steps = (
-    500000  # Number of steps over which the initial exploration noise will decay over
-)
-expl_min = 0.1  # Exploration noise after the decay in range [0...expl_noise]
-batch_size = 40  # Size of the mini-batch
-discount = 0.99999  # Discount factor to calculate the discounted future reward (should be close to 1)
-tau = 0.005  # Soft target update variable (should be close to 0)
-policy_noise = 0.2  # Added noise for exploration
-noise_clip = 0.5  # Maximum clamping values of the noise
-policy_freq = 2  # Frequency of Actor network updates
-buffer_size = 1e6  # Maximum size of the buffer
-file_name = "SAC_velodyne_LLM"  # name of the file to store the policy
-save_model = True  # Weather to save the model or not
-load_model = False  # Weather to load a stored model
-random_near_obstacle = True  # To take random actions near obstacles or not
-use_LLM_HER = True  # Weather to use LLM HER or not
-use_HER = False  # Weather to use HER or not
-lr = 0.001  # Learning rate for the networks
-alpha = 0.2  # Alpha value for the SAC algorithm
 
 # Create the network storage folders
 if not os.path.exists("./results"):
@@ -344,11 +364,14 @@ episode_timesteps = 0
 target = False
 total_reward = 0
 target_reached = 0
+epoch_success = 0
+epoch_reward = 0
 col_total = 0
 
 count_rand_actions = 0
 random_action = []
 state_sequnce = []
+angle_squence = []
 odom_sequnce = []
 
 predictor = GoalPredictor(api_base, api_key, deployment_name, api_version)
@@ -380,6 +403,8 @@ while timestep < max_timesteps:
         if episode_num != 0:
             # 在 episode 结束时
             target_reached += int(target)
+            epoch_success += int(target)
+            epoch_reward += episode_reward
             total_reward += episode_reward
             writer.add_scalar('train/avg_reward', total_reward/(episode_num+1), timestep)
             writer.add_scalar('train/steps', episode_timesteps, episode_num)
@@ -387,61 +412,88 @@ while timestep < max_timesteps:
             writer.add_scalar('train/collision', col_total/(episode_num+1), episode_num)
             print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}, done:{}".format(episode_num, timestep, episode_timesteps, round(episode_reward, 2), int(target)))
 
-            if not target and episode_timesteps>1 and np.random.uniform(0, 1) < 0.8 and episode_num < 300 and use_LLM_HER:
+            sample_rate = 1 - (episode_num/1000)
+            # print('odom:', odom_sequnce)
+            
+            if not target and episode_timesteps > 50 and np.random.uniform(0, 1) < sample_rate and use_LLM_HER:
                 # with open('data.txt', 'w') as file:
                 #     np.savetxt(file, state_sequnce, fmt='%f')
                 # print('goal:', info['goal_x'], info['goal_y'])
                 # if len(state_sequnce) > 50:
-                    # state_sequnce = state_sequnce[-50:]
-                    # odom_sequnce = odom_sequnce[-50:]
-                if len(odom_state_sequence) > 50:
-                    odom_state_sequence = odom_state_sequence[-50:]
+                #     state_sequnce = state_sequnce[-50:]
+                #     odom_sequnce = odom_sequnce[-50:]
+                
+                if len(odom_state_sequence) > 500:
+                    odom_state_sequence = odom_state_sequence[-200:]
 
                 if info['collision']:
                     reason = 'collision. The collision point is ({}, {})'.format(info['collision_point'][0], info['collision_point'][1])
                 elif episode_timesteps > 499:
                     reason = 'timeout'
                 
-                # new_goal_x, new_goal_y = predictor.get_new_goal(info['goal_x'], info['goal_y'], state_sequnce, odom_sequnce)
+                # new_state, new_goal_x, new_goal_y = predictor.get_new_goal(info['goal_x'], info['goal_y'], reason, state_sequnce, odom_sequnce, angle_squence)
+                # new_state_sequence, new_next_state_sequence, new_odom_x_sequence, new_odom_y_sequence, new_angle_sequence, new_goal_x, new_goal_y = predictor.get_new_goal(info['goal_x'], info['goal_y'], reason, state_sequnce, odom_sequnce, angle_squence)
                 new_goal_x, new_goal_y = predictor.get_new_goal(info['goal_x'], info['goal_y'], reason, odom_state_sequence)
-                # print('new goal:', new_goal_x, new_goal_y)
-                # print('old goal:', info['goal_x'], info['goal_y'])
-                # print(new_goal_x != info['goal_x'], new_goal_y != info['goal_y'])
-
+                # new_state_sequence, new_next_state_sequence, new_odom_x_sequence, new_odom_y_sequence, new_angle_sequence, new_goal_x, new_goal_y = result
+                # start_index, end_index = predictor.get_index(odom_state_sequence)
                 if new_goal_x != info['goal_x'] or new_goal_y != info['goal_y']:
-                    env.perturb_goal(new_goal_x, new_goal_y, state[:-4])
+                # if end_index-start_index > 9:
+                #     env.publish_traj(odom_state_sequence[start_index:end_index+1])
+                #     # env.perturb_goal(new_goal_x, new_goal_y, state[:-4])
+                #     new_goal_x = odom_state_sequence[end_index][0]
+                #     new_goal_y = odom_state_sequence[end_index][1]
                     env.publish_last_old_markers(info['goal_x'], info['goal_y'])
                     env.publish_last_new_markers(new_goal_x, new_goal_y)
                     print('new goal generated.')
-                    for i in range(episode_timesteps):
+                    distance = np.sqrt((new_goal_x - info['goal_x'])**2 + (new_goal_y - info['goal_y'])**2)
+                    reward_scale = np.clip(1 - distance/10, 0.5, 1)
+                    writer.add_scalar('train/goal_distance', distance, episode_num)
+                    new_state, _, _, _, _, _, _, _, _, _, _ = replay_buffer.get_last_episode(0)
+                    for i in range(1, episode_timesteps):
                         # 获取当前 episode 的 transition
                         # print('start:', replay_buffer.episode_start_indices)
                         # print('i:', i)
-                        old_state, old_action, old_reward, old_done_bool, old_done, old_next_state, odom_x, odom_y, angle, goal_x, goal_y = replay_buffer.get_last_episode(i)
+                        old_next_state, old_action, old_reward, old_done_bool, old_done, old_next_state, odom_x, odom_y, angle, goal_x, goal_y = replay_buffer.get_last_episode(i)
                         # print('length:', replay_buffer.size(), 'steps:', episode_timesteps)
 
                         # 重新计算 reward 和 state
-                        new_state, new_reward, new_target = env.calculate_reward_and_state(old_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
-                        new_next_state, _, _ = env.calculate_reward_and_state(old_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
+                        # new_state, new_reward, new_target = env.calculate_reward_and_state(new_state_sequence[i], new_odom_x_sequence[i], new_odom_y_sequence[i], new_angle_sequence[i], new_goal_x, new_goal_y)
+                        new_next_state, new_reward, new_target = env.calculate_reward_and_state(old_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
+                        #new_next_state, _, _ = env.calculate_reward_and_state(old_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
+                        # new_next_state = new_next_state_sequence[i]
                         # print('new_next_state:', np.shape(next_state))
 
                         new_done = 1 if new_target else int(old_done)
                         new_done_bool = 1 if new_target else int(old_done_bool)
 
                         # 更新 replay buffer 中的 transition
-                        replay_buffer.update_last_episode(i, new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, goal_x, goal_y)
-                        # replay_buffer.add(new_state, old_action, new_reward, new_done_bool, new_done, new_next_state)
+                        # replay_buffer.update_last_episode(i, new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, goal_x, goal_y)
+                        replay_buffer.add(new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
+                        new_state = new_next_state
+                        if new_done:
+                            break
 
         
-        # state_sequnce = []
-        # odom_sequnce = []
+        state_sequnce = []
+        odom_sequnce = []
+        angle_squence = []
         odom_state_sequence = []
         state, info = env.reset()
         # print('shape:', np.shape(state))
         #print(state)
         done = False
         # state_sequnce.append(state)
-        odom_state_sequence.append(info['odom_state'])
+        # odom_state_sequence.append(info['odom_state'])
+
+        # if episode_num % 100 == 0:
+        #     writer.add_scalar('train/epoch_success', epoch_success/100, episode_num/100)
+        #     epoch_success = 0
+
+        if episode_num % 10 == 0:
+            writer.add_scalar('train/epoch_success', epoch_success/10, episode_num/10)
+            writer.add_scalar('train/epoch_reward', epoch_reward/10, episode_num/10)
+            epoch_success = 0
+            epoch_reward = 0
 
         episode_reward = 0
         episode_timesteps = 0
@@ -492,8 +544,9 @@ while timestep < max_timesteps:
 
     # Update the counters
     state = next_state
-    # state_sequnce.append(state.flatten().tolist())
-    # odom_sequnce.append(np.round(np.array([float(info['odom_x']), float(info['odom_y'])]),4))
+    state_sequnce.append(state.flatten().tolist())
+    angle_squence.append(info['angle'])
+    odom_sequnce.append(np.round(np.array([float(info['odom_x']), float(info['odom_y'])]),4))
     odom_state_sequence.append(info['odom_state'])
     episode_timesteps += 1
     timestep += 1

@@ -78,6 +78,28 @@ class ReplayBuffer(object):
         self.buffer[start_idx + i] = (s, a, r, terminate, done, next_state, odom_x, odom_y, angle, goal_x, goal_y)
         # print("Updated last episode at index:", start_idx + i)
 
+    def remove_last_episode_elements(self, num_elements):
+        """
+        移除最后一个 episode 中的固定数量的元素
+        """
+        if not self.episode_start_indices:
+            raise ValueError("No episode data in buffer")
+
+        # 获取最后一个 episode 的起始索引
+        start_idx = self.episode_start_indices[-1]
+        
+        # 检查需要移除的元素数量是否超出该 episode 的长度
+        num_elements_to_remove = min(num_elements, self.count - start_idx)
+
+        # 移除最后一个 episode 中的指定数量的元素
+        for _ in range(num_elements_to_remove):
+            self.buffer.pop()
+            self.count -= 1
+
+        # 如果整个 episode 被移除，则删除其起始索引
+        if start_idx >= self.count:
+            self.episode_start_indices.pop()
+
     def clear(self):
         self.buffer.clear()
         self.count = 0

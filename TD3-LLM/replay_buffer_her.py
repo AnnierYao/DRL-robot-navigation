@@ -72,8 +72,7 @@ class ReplayBuffer(object):
                 new_goal_x= episode[step_goal][-5]
                 new_goal_y = episode[step_goal][-4]
                 # 重新计算 reward 和 state
-                state, reward, target = self.calculate_reward_and_state(state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
-                next_state, _, _ = self.calculate_reward_and_state(next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
+                next_state, reward, target = self.calculate_reward_and_state(state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
                 done = 1 if target else int(done)
                 terminate = 1 if target else int(terminate)
 
@@ -158,18 +157,32 @@ class ReplayBuffer(object):
         target = False
         collision = min(state[:-4]) < COLLISION_DIST
         min_laser = min(state[:-4])
+        action = [state[-2], state[-1]]
 
-        if collision:
-            reward = -100.0
-        elif distance < GOAL_REACHED_DIST:
-            target = True
-            reward = 100.0
-        else:
-            r3 = lambda x: 1 - x if x < 1 else 0.0
-            reward = state[-2] / 2 - abs(state[-1]) / 2 - r3(min_laser) / 2
-
+        reward = self.get_sparse_reward(target, collision)
+        # reward = self.get_reward(target, collision, [0, 0], min_laser)
         # 更新状态
         robot_state = [distance, theta, state[-2], state[-1]]
         new_state = np.append(state[:-4], robot_state)
 
         return new_state, reward, target
+
+    @staticmethod
+    def get_reward(target, collision, action, min_laser):
+        if target:
+            return 100.0
+        elif collision:
+            return -100.0
+        else:
+            r3 = lambda x: 1 - x if x < 1 else 0.0
+            return action[0] / 2 - abs(action[1]) / 2 - r3(min_laser) / 2
+        
+    @staticmethod
+    def get_sparse_reward(target, collision):
+        if target:
+            return 10
+        elif collision:
+            return -5
+        else:
+            return -0.1
+        

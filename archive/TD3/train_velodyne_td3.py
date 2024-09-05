@@ -9,7 +9,7 @@ from numpy import inf
 from torch.utils.tensorboard import SummaryWriter
 
 from replay_buffer import ReplayBuffer
-from velodyne_env import GazeboEnv
+from rplidar_env import GazeboEnv
 
 writer = SummaryWriter()
 
@@ -331,7 +331,7 @@ while timestep < max_timesteps:
         writer.add_scalar('train/collision', col_total/(episode_num+1), episode_num)
         print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}, done:{}".format(episode_num, timestep, episode_timesteps, round(episode_reward, 2), int(target)))
 
-        state = env.reset()
+        state, info = env.reset()
         done = False
 
         episode_reward = 0
@@ -342,6 +342,7 @@ while timestep < max_timesteps:
     if expl_noise > expl_min:
         expl_noise = expl_noise - ((1 - expl_min) / expl_decay_steps)
 
+    print(state)
     action = network.get_action(np.array(state))
     action = (action + np.random.normal(0, expl_noise, size=action_dim)).clip(
         -max_action, max_action
@@ -366,7 +367,7 @@ while timestep < max_timesteps:
 
     # Update action to fall in range [0,1] for linear velocity and [-1,1] for angular velocity
     a_in = [(action[0] + 1) / 2, action[1]]
-    next_state, reward, done, target = env.step(a_in)
+    next_state, reward, done, target, info = env.step(a_in)
     done_bool = 0 if episode_timesteps + 1 == max_ep else int(done)
     done = 1 if episode_timesteps + 1 == max_ep else int(done)
     episode_reward += reward

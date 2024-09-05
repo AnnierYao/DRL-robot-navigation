@@ -2,12 +2,14 @@ import math
 import time
 from os import path
 
+
 import numpy as np
 import rospy
 import sensor_msgs.point_cloud2 as pc2
 # import sensor_msgs.msg as sensor_msg
 from gazebo_msgs.msg import ModelState
 from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Point
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2
 from squaternion import Quaternion
@@ -133,6 +135,7 @@ class GazeboEnv:
         self.publisher12 = rospy.Publisher("last_old_goal_point", MarkerArray, queue_size=3)
         self.publisher2 = rospy.Publisher("linear_velocity", MarkerArray, queue_size=1)
         self.publisher3 = rospy.Publisher("angular_velocity", MarkerArray, queue_size=1)
+        self.traj_publisher = rospy.Publisher("odom_traj", MarkerArray, queue_size=10)
         self.velodyne = rospy.Subscriber(
             "/velodyne_points", PointCloud2, self.velodyne_callback, queue_size=1
         )
@@ -497,24 +500,29 @@ class GazeboEnv:
         skew_x = new_goal_x - robot_x
         skew_y = new_goal_y - robot_y
 
-        dot = skew_x * 1 + skew_y * 0
-        mag1 = math.sqrt(math.pow(skew_x, 2) + math.pow(skew_y, 2))
-        mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
-        beta = math.acos(dot / (mag1 * mag2))
+        # 判断是否已经到达目标位置
+        if skew_x == 0 and skew_y == 0:
+            # 机器人已经到达目标，角度为0
+            theta = 0
+        else:
+            dot = skew_x * 1 + skew_y * 0
+            mag1 = math.sqrt(math.pow(skew_x, 2) + math.pow(skew_y, 2))
+            mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
+            beta = math.acos(dot / (mag1 * mag2))
 
-        if skew_y < 0:
-            if skew_x < 0:
-                beta = -beta
-            else:
-                beta = 0 - beta
+            if skew_y < 0:
+                if skew_x < 0:
+                    beta = -beta
+                else:
+                    beta = 0 - beta
 
-        theta = beta - robot_theta
-        if theta > np.pi:
-            theta = np.pi - theta
-            theta = -np.pi - theta
-        if theta < -np.pi:
-            theta = -np.pi - theta
-            theta = np.pi - theta
+            theta = beta - robot_theta
+            if theta > np.pi:
+                theta = np.pi - theta
+                theta = -np.pi - theta
+            if theta < -np.pi:
+                theta = -np.pi - theta
+                theta = np.pi - theta
 
         # 计算奖励
         target = False
@@ -535,8 +543,7 @@ class GazeboEnv:
         new_state = np.append(state[:-4], robot_state)
 
         return new_state, reward, target
-    
-    import numpy as np
+
 
     def perturb_goal(self, goal_x, goal_y, laser_data, safe_distance=0.5, lidar_range=(-np.pi/2, np.pi/2)):
         """
@@ -610,3 +617,27 @@ class GazeboEnv:
         markerArray12.markers.append(marker12)
 
         self.publisher12.publish(markerArray12)
+
+    def publish_traj(self, odom_sequence):
+        # Publish visual data in Rviz
+        markerArray = MarkerArray()
+        marker = Marker()
+        marker.header.frame_id = "odom"
+        marker.type = marker.LINE_STRIP
+        marker.action = marker.ADD
+        marker.scale.x = 0.05
+        marker.color.a = 1.0
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+
+        for i in range(len(odom_sequence)):
+            point = Point()
+            point.x = odom_sequence[i][0]
+            point.y = odom_sequence[i][1]
+            point.z = 0
+            marker.points.append(point)
+
+        markerArray.markers.append(marker)
+
+        self.traj_publisher.publish(markerArray)

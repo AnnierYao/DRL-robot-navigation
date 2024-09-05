@@ -19,7 +19,7 @@ from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 
 GOAL_REACHED_DIST = 0.3
-COLLISION_DIST = 0.28
+COLLISION_DIST = 0.35
 TIME_DELTA = 0.1
 
 
@@ -73,9 +73,10 @@ class GazeboEnv:
 
         self.goal_x = 1
         self.goal_y = 0.0
+        self.angle = 0.0
 
-        self.upper = 5.0
-        self.lower = -5.0
+        self.upper = 8.5
+        self.lower = -8.5
         self.rplidar_data = np.ones(self.environment_dim) * 10
         self.odom_state = []
 
@@ -91,7 +92,7 @@ class GazeboEnv:
         self.set_self_state.pose.orientation.z = 0.0
         self.set_self_state.pose.orientation.w = 1.0
 
-        self.gaps = [[-np.pi / 2 - 0.03, -np.pi / 2 + np.pi / self.environment_dim]]
+        self.gaps = [[np.pi / 2 - 0.03, np.pi / 2 + np.pi / self.environment_dim]]
         for m in range(self.environment_dim - 1):
             self.gaps.append(
                 [self.gaps[m][1], self.gaps[m][1] + np.pi / self.environment_dim]
@@ -195,7 +196,8 @@ class GazeboEnv:
     def step(self, action):
         target = False
         collision = False
-        info = {'odom_x': self.odom_x, 'odom_y': self.odom_y, 'goal_x': self.goal_x, 'goal_y': self.goal_y, 'collision': collision, ' collision point': [], 'odom_state': self.odom_state, 'min_laser': 10}
+
+        info = {'odom_x': self.odom_x, 'odom_y': self.odom_y, 'angle': self.angle, 'goal_x': self.goal_x, 'goal_y': self.goal_y, 'collision': collision, ' collision_point': [], 'odom_state': self.odom_state, 'min_laser': 10}
 
         # Publish the robot action
         vel_cmd = Twist()
@@ -236,7 +238,7 @@ class GazeboEnv:
             self.last_odom.pose.pose.orientation.z,
         )
         euler = quaternion.to_euler(degrees=False)
-        angle = round(euler[2], 4)
+        self.angle = round(euler[2], 4)
         self.odom_traj.append([self.odom_x, self.odom_y])
 
         info['odom_x'] = self.odom_x
@@ -245,6 +247,8 @@ class GazeboEnv:
         info['goal_y'] = self.goal_y
         info['collision'] = collision
         info['min_laser'] = min_laser
+        info['angle'] = self.angle
+
         if collision:
             info['collision point'] = [self.odom_x, self.odom_y]
 
@@ -265,7 +269,7 @@ class GazeboEnv:
                 beta = -beta
             else:
                 beta = 0 - beta
-        theta = beta - angle
+        theta = beta - self.angle
         if theta > np.pi:
             theta = np.pi - theta
             theta = -np.pi - theta
@@ -296,18 +300,18 @@ class GazeboEnv:
         except rospy.ServiceException as e:
             print("/gazebo/reset_simulation service call failed")
 
-        info = {'odom_x': self.odom_x, 'odom_y': self.odom_y, 'goal_x': self.goal_x, 'goal_y': self.goal_y, 'collision': False, ' collision point': [], 'odom_state': self.odom_state, 'min_laser': 10}
-
-        angle = np.random.uniform(-np.pi, np.pi)
-        quaternion = Quaternion.from_euler(0.0, 0.0, angle)
+        info = {'odom_x': self.odom_x, 'odom_y': self.odom_y, 'angle': self.angle, 'goal_x': self.goal_x, 'goal_y': self.goal_y, 'collision': False, ' collision_point': [], 'odom_state': self.odom_state, 'min_laser': 10}
+        
+        self.angle = np.random.uniform(-np.pi, np.pi)
+        quaternion = Quaternion.from_euler(0.0, 0.0, self.angle)
         object_state = self.set_self_state
 
         x = 0
         y = 0
         position_ok = False
         while not position_ok:
-            x = np.random.uniform(-4.5, 4.5)
-            y = np.random.uniform(-4.5, 4.5)
+            x = np.random.uniform(-8.5, 8.5)
+            y = np.random.uniform(-8.5, 8.5)
             position_ok = check_pos(x, y)
         object_state.pose.position.x = x
         object_state.pose.position.y = y
@@ -324,7 +328,7 @@ class GazeboEnv:
         # set a random goal in empty space in environment
         self.change_goal()
         # randomly scatter boxes in the environment
-        self.random_box()
+        # self.random_box()
         self.publish_markers([0.0, 0.0])
 
         rospy.wait_for_service("/gazebo/unpause_physics")
@@ -352,6 +356,9 @@ class GazeboEnv:
         info['odom_y'] = self.odom_y
         info['goal_x'] = self.goal_x
         info['goal_y'] = self.goal_y
+        info['collision'] = collision
+        info['min_laser'] = min_laser
+        info['angle'] = self.angle
 
         distance = np.linalg.norm(
             [self.odom_x - self.goal_x, self.odom_y - self.goal_y]
@@ -370,7 +377,7 @@ class GazeboEnv:
                 beta = -beta
             else:
                 beta = 0 - beta
-        theta = beta - angle
+        theta = beta - self.angle
 
         if theta > np.pi:
             theta = np.pi - theta
@@ -392,12 +399,12 @@ class GazeboEnv:
         if self.lower > -10:
             self.lower -= 0.004
 
-        goal_ok = False
+        # goal_ok = False
 
-        while not goal_ok:
-            self.goal_x = self.odom_x + random.uniform(self.upper, self.lower)
-            self.goal_y = self.odom_y + random.uniform(self.upper, self.lower)
-            goal_ok = check_pos(self.goal_x, self.goal_y)
+        # while not goal_ok:
+        self.goal_x = self.odom_x + random.uniform(self.upper, self.lower)
+        self.goal_y = self.odom_y + random.uniform(self.upper, self.lower)
+            # goal_ok = check_pos(self.goal_x, self.goal_y)
 
     def random_box(self):
         # Randomly change the location of the boxes in the environment on each reset to randomize the training
