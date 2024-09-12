@@ -18,7 +18,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # cuda or
 seed = 1  # Random seed number
 eval_freq = 1e3  # After how many steps to perform the evaluation
 start_steps = 1e4  # Number of steps to perform the evaluation
-max_ep = 500  # maximum number of steps per episode
+max_ep = 1000  # maximum number of steps per episode
 eval_ep = 10  # number of episodes for evaluation
 max_timesteps = 5e5  # Maximum number of steps to perform
 expl_noise = 1  # Initial exploration noise starting value in range [expl_min ... 1]
@@ -32,30 +32,35 @@ tau = 0.005  # Soft target update variable (should be close to 0)
 policy_noise = 0.2  # Added noise for exploration
 noise_clip = 0.5  # Maximum clamping values of the noise
 policy_freq = 2  # Frequency of Actor network updates
-buffer_size = 1e6  # Maximum size of the buffer
-name = "SAC_velodyne"  # name of the file to store the policy
+buffer_size = 1000000  # Maximum size of the buffer
+name = "SAC_rplidar"  # name of the file to store the policy
 save_model = True  # Weather to save the model or not
 load_model = False  # Weather to load a stored model
 random_near_obstacle = True  # To take random actions near obstacles or not
-reward_type = 'sparse'  # Reward type, sparse or dense
+reward_type = 'hybird'  # Reward type, sparse or dense
 env_name = "RplidarEnv"  # Environment name
 # from velodyne_env_maze import GazeboEnv
-# from rplidar_env import GazeboEnv
-from rplidar_env_maze import GazeboEnv
-use_LLM_HER = True # Weather to use LLM HER or not
+from rplidar_env import GazeboEnv
+# from rplidar_env_maze import GazeboEnv
+# from rplidar_env_distance import GazeboEnv
+# from rplidar_env_sparse import GazeboEnv
+use_LLM_HER = False # Weather to use LLM HER or not
+curriculum_steps = 150  # Number of steps to perform the HER algorithm
 feedback_form = 'goal'  # Feedback form for the HER algorithm
 from gpt_feedback import GoalPredictor
 use_HER = False  # Weather to use HER or not
-from replay_buffer import ReplayBuffer
+use_PER_HER = True  # Weather to use PER HER or not
+# from replay_buffer import ReplayBuffer
+from replay_buffer_PER import ReplayBuffer
 # from replay_buffer_her import ReplayBuffer
 lr = 0.001  # Learning rate for the networks
 alpha = 0.2  # Alpha value for the SAC algorithm
 
 
-file_name = '{}_{}_{}_{}_{}_{}_{}'.format(name, reward_type, feedback_form, env_name,
+file_name = '{}_{}_{}_{}_{}_{}_{}_{}_{}'.format(name, reward_type, feedback_form if use_LLM_HER else "", env_name,
                                                     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), 
                                                     "HER" if use_HER else "", 
-                                                    "LLM_HER" if use_LLM_HER else "")
+                                                    "LLM_HER" if use_LLM_HER else "", curriculum_steps if use_LLM_HER else "","PER_HER" if use_PER_HER else "")
 result_path = './runs/' + file_name
 writer = SummaryWriter(result_path)
 
@@ -240,12 +245,15 @@ class SAC(object):
                 batch_rewards,
                 batch_dones,
                 batch_next_states,
+                batch_is_weights,
+                idxes,
             ) = replay_buffer.sample_batch(batch_size)
             state = torch.Tensor(batch_states).to(device)
             next_state = torch.Tensor(batch_next_states).to(device)
             action = torch.Tensor(batch_actions).to(device)
             reward = torch.Tensor(batch_rewards).to(device)
             done = torch.Tensor(batch_dones).to(device)
+            is_weights = torch.Tensor(batch_is_weights).to(device)
 
             with torch.no_grad():
                 next_state_action, next_state_log_pi, _ = self.policy.sample(next_state)
@@ -255,10 +263,26 @@ class SAC(object):
                 av_Q += torch.mean(min_qf_next_target)
                 max_Q = max(max_Q, torch.max(min_qf_next_target))
 
+            
             qf1, qf2 = self.critic(state, action)  # Two Q-functions to mitigate positive bias in the policy improvement step
-            qf1_loss = F.mse_loss(qf1, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
-            qf2_loss = F.mse_loss(qf2, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+            # 计算 TD 误差
+            td_error_qf1 = qf1 - next_q_value
+            td_error_qf2 = qf2 - next_q_value
+
+            # 计算加权平方误差
+            weighted_squared_td_error1 = is_weights * (td_error_qf1 ** 2)
+            weighted_squared_td_error2 = is_weights * (td_error_qf2 ** 2)
+
+            # 计算加权 MSE 损失
+            qf1_loss = weighted_squared_td_error1.mean()
+            qf2_loss = weighted_squared_td_error2.mean()
+            # qf1_loss = F.mse_loss(qf1, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+            # qf2_loss = F.mse_loss(qf2, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
             qf_loss = qf1_loss + qf2_loss
+
+            # print(type(idxes[0]))
+            # print(type(td_error.detach().cpu().numpy().squeeze()))  # 输出类型
+            # print(td_error.detach().cpu().numpy().squeeze())        # 输出值
 
             self.critic_optim.zero_grad()
             qf_loss.backward()
@@ -269,7 +293,12 @@ class SAC(object):
             qf1_pi, qf2_pi = self.critic(state, pi)
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
 
-            policy_loss = ((self.alpha * log_pi) - min_qf_pi).mean() # Jπ = 𝔼st∼D,εt∼N[α * logπ(f(εt;st)|st) − Q(st,f(εt;st))]
+            td_error_policy = self.alpha * log_pi - min_qf_pi
+
+            policy_loss = td_error_policy.mean() # Jπ = 𝔼st∼D,εt∼N[α * logπ(f(εt;st)|st) − Q(st,f(εt;st))]
+
+            td_error = abs(((td_error_qf1 + td_error_qf2) / 6.0 + td_error_policy + 1e-5).squeeze())
+            replay_buffer.update_priorities(idxes,td_error.detach().cpu().numpy().squeeze())
 
             self.policy_optim.zero_grad()
             policy_loss.backward()
@@ -290,7 +319,7 @@ class SAC(object):
             # av_alpha_loss += alpha_loss.item()
         self.iter_count += 1
         # Write new values for tensorboard
-        writer.add_scalar("loss", av_loss / iterations, self.iter_count)
+        writer.add_scalar("loss", policy_loss.item(), self.iter_count)
         writer.add_scalar("Av. Q", av_Q / iterations, self.iter_count)
         writer.add_scalar("Max. Q", max_Q, self.iter_count)
         
@@ -414,10 +443,11 @@ while timestep < max_timesteps:
             writer.add_scalar('train/collision', col_total/(episode_num+1), episode_num)
             print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}, done:{}".format(episode_num, timestep, episode_timesteps, round(episode_reward, 2), int(target)))
 
-            sample_rate = 1 - (episode_num/1000)
+            sample_rate = 1 - (episode_num/curriculum_steps)
             # print('odom:', odom_sequnce)
             
-            if not target and episode_timesteps > 50 and np.random.uniform(0, 1) < sample_rate and use_LLM_HER:
+            # if not target and episode_timesteps > 50 and np.random.uniform(0, 1) < sample_rate and use_LLM_HER:
+            if not target and episode_timesteps > 50 and episode_num < curriculum_steps and use_LLM_HER:
                 # with open('data.txt', 'w') as file:
                 #     np.savetxt(file, state_sequnce, fmt='%f')
                 # print('goal:', info['goal_x'], info['goal_y'])
@@ -450,12 +480,13 @@ while timestep < max_timesteps:
                     distance = np.sqrt((new_goal_x - info['goal_x'])**2 + (new_goal_y - info['goal_y'])**2)
                     reward_scale = np.clip(1 - distance/10, 0.5, 1)
                     writer.add_scalar('train/goal_distance', distance, episode_num)
-                    new_state, _, _, _, _, _, _, _, _, _, _ = replay_buffer.get_last_episode(0)
+                    init_state, _, _, _, _, _, init_odom_x, init_odom_y, init_angel, _, _, _ = replay_buffer.get_last_episode(0)
+                    new_state, _, _ = env.calculate_reward_and_state(init_state, init_odom_x, init_odom_y, init_angel, new_goal_x, new_goal_y)
                     for i in range(1, episode_timesteps):
                         # 获取当前 episode 的 transition
                         # print('start:', replay_buffer.episode_start_indices)
                         # print('i:', i)
-                        old_next_state, old_action, old_reward, old_done_bool, old_done, old_next_state, odom_x, odom_y, angle, goal_x, goal_y = replay_buffer.get_last_episode(i)
+                        old_next_state, old_action, old_reward, old_done_bool, old_done, old_next_state, odom_x, odom_y, angle, goal_x, goal_y, priority = replay_buffer.get_last_episode(i)
                         # print('length:', replay_buffer.size(), 'steps:', episode_timesteps)
 
                         # 重新计算 reward 和 state
@@ -470,7 +501,10 @@ while timestep < max_timesteps:
 
                         # 更新 replay buffer 中的 transition
                         # replay_buffer.update_last_episode(i, new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, goal_x, goal_y)
-                        replay_buffer.add(new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
+
+                        max_priority = replay_buffer._get_max_priority()
+
+                        replay_buffer.add(new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y, max_priority)
                         new_state = new_next_state
                         if new_done:
                             break
@@ -535,14 +569,18 @@ while timestep < max_timesteps:
     done_bool = 0 if episode_timesteps + 1 == max_ep else int(done)
     done = 1 if episode_timesteps + 1 == max_ep else int(done)
     episode_reward += reward
-    if reward < -90:
+    if info['collision']:
         col_total += 1
         collision = True
     else:
         collision = False
 
     # Save the tuple in replay buffer
-    replay_buffer.add(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'] , info['angle'], info["goal_x"], info["goal_y"])
+    if use_PER_HER:
+        max_priority = replay_buffer._get_max_priority()
+        replay_buffer.add(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'], info['angle'], info["goal_x"], info["goal_y"], max_priority)
+    else:
+        replay_buffer.add(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'] , info['angle'], info["goal_x"], info["goal_y"])
 
     # Update the counters
     state = next_state

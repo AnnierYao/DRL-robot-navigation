@@ -41,12 +41,15 @@ reward_type = 'sparse'  # Reward type, sparse or dense
 env_name = "RplidarEnv"  # Environment name
 # from velodyne_env_maze import GazeboEnv
 # from rplidar_env import GazeboEnv
-from rplidar_env_maze import GazeboEnv
-use_LLM_HER = True # Weather to use LLM HER or not
+# from rplidar_env_maze import GazeboEnv
+# from rplidar_env_distance import GazeboEnv
+from rplidar_env_sparse import GazeboEnv
+use_LLM_HER = False # Weather to use LLM HER or not
 feedback_form = 'goal'  # Feedback form for the HER algorithm
 from gpt_feedback import GoalPredictor
 use_HER = False  # Weather to use HER or not
 from replay_buffer import ReplayBuffer
+# from replay_buffer_PER import ReplayBuffer
 # from replay_buffer_her import ReplayBuffer
 lr = 0.001  # Learning rate for the networks
 alpha = 0.2  # Alpha value for the SAC algorithm

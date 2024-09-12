@@ -569,7 +569,10 @@ class GazeboEnv:
         collision = min(state[:-4]) < COLLISION_DIST
         min_laser = min(state[:-4])
 
-        reward = self.get_sparse_reward(target, collision)
+        action = [state[-2], state[-1]]
+
+        # reward = self.get_sparse_reward(target, collision)
+        reward = self.get_reward(target, collision, action, min_laser)
 
         # 更新状态
         robot_state = [distance, theta, state[-2], state[-1]]

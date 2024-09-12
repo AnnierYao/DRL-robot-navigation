@@ -51,3 +51,21 @@ print('next state sequence', next_state_sequence)
 print('odom x sequence', odom_x_sequence)
 print('odom y sequence', odom_y_sequence)
 print('angle sequence', angle_sequence)
+
+
+
+{
+  "walls": [
+    {"start": [-9, -9], "end": [-9, 9]},
+    {"start": [-9, -9], "end": [9, -9]},
+    {"start": [-9, 9], "end": [9, 9]},
+    {"start": [9, -9], "end": [9, 9]},
+    {"start": [0, 7.5], "end": [0, 2.8]},
+    {"start": [0, 2.8], "end": [9, 2.8]},
+    {"start": [-3, 4], "end": [-3,  -1]},
+    {"start": [-3, -1], "end": [9, -1]},
+    {"start": [-6, 6], "end": [-6, -6]},
+    {"start": [-6, -6], "end": [9, -6]},
+    {"start": [-3, 9], "end": [-3, 7.5]}
+  ]
+}

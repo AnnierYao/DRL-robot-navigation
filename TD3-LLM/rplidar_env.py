@@ -75,8 +75,8 @@ class GazeboEnv:
         self.goal_y = 0.0
         self.angle = 0.0
 
-        self.upper = 8.5
-        self.lower = -8.5
+        self.upper = 5
+        self.lower = -5
         self.rplidar_data = np.ones(self.environment_dim) * 10
         self.odom_state = []
 
@@ -250,7 +250,7 @@ class GazeboEnv:
         info['angle'] = self.angle
 
         if collision:
-            info['collision point'] = [self.odom_x, self.odom_y]
+            info['collision_point'] = [self.odom_x, self.odom_y]
 
         # Calculate distance to the goal from the robot
         distance = np.linalg.norm(
@@ -310,8 +310,8 @@ class GazeboEnv:
         y = 0
         position_ok = False
         while not position_ok:
-            x = np.random.uniform(-8.5, 8.5)
-            y = np.random.uniform(-8.5, 8.5)
+            x = np.random.uniform(-4.5, 4.5)
+            y = np.random.uniform(-4.5, 4.5)
             position_ok = check_pos(x, y)
         object_state.pose.position.x = x
         object_state.pose.position.y = y
@@ -399,12 +399,12 @@ class GazeboEnv:
         if self.lower > -10:
             self.lower -= 0.004
 
-        # goal_ok = False
+        goal_ok = False
 
-        # while not goal_ok:
-        self.goal_x = self.odom_x + random.uniform(self.upper, self.lower)
-        self.goal_y = self.odom_y + random.uniform(self.upper, self.lower)
-            # goal_ok = check_pos(self.goal_x, self.goal_y)
+        while not goal_ok:
+            self.goal_x = self.odom_x + random.uniform(self.upper, self.lower)
+            self.goal_y = self.odom_y + random.uniform(self.upper, self.lower)
+            goal_ok = check_pos(self.goal_x, self.goal_y)
 
     def random_box(self):
         # Randomly change the location of the boxes in the environment on each reset to randomize the training
@@ -517,11 +517,11 @@ class GazeboEnv:
             r3 = lambda x: 1 - x if x < 1 else 0.0
             return action[0] / 2 - abs(action[1]) / 2 - r3(min_laser) / 2
         
-    def calculate_reward_and_state(self, state, new_goal_x, new_goal_y):
+    def calculate_reward_and_state(self, state,  odom_x, odom_y, angel, new_goal_x, new_goal_y):
         # 获取机器人当前位置
-        robot_x = state[-4]
-        robot_y = state[-3]
-        robot_theta = state[-2]
+        robot_x = odom_x
+        robot_y = odom_y
+        robot_theta = angel
 
         # 计算新目标的距离
         distance = np.linalg.norm([robot_x - new_goal_x, robot_y - new_goal_y])
@@ -530,18 +530,26 @@ class GazeboEnv:
         skew_x = new_goal_x - robot_x
         skew_y = new_goal_y - robot_y
 
-        dot = skew_x * 1 + skew_y * 0
-        mag1 = math.sqrt(math.pow(skew_x, 2) + math.pow(skew_y, 2))
-        mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
-        beta = math.acos(dot / (mag1 * mag2))
+        # dot = skew_x * 1 + skew_y * 0
+        # mag1 = math.sqrt(math.pow(skew_x, 2) + math.pow(skew_y, 2))
+        # mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
+        # beta = math.acos(dot / (mag1 * mag2))
+        # 判断是否已经到达目标位置
+        if skew_x == 0 and skew_y == 0:
+            # 机器人已经到达目标，角度为0
+            theta = 0
+        else:
+            dot = skew_x * 1 + skew_y * 0
+            mag1 = math.sqrt(math.pow(skew_x, 2) + math.pow(skew_y, 2))
+            mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
+            beta = math.acos(dot / (mag1 * mag2))
+            if skew_y < 0:
+                if skew_x < 0:
+                    beta = -beta
+                else:
+                    beta = 0 - beta
 
-        if skew_y < 0:
-            if skew_x < 0:
-                beta = -beta
-            else:
-                beta = 0 - beta
-
-        theta = beta - robot_theta
+            theta = beta - robot_theta
         if theta > np.pi:
             theta = np.pi - theta
             theta = -np.pi - theta
