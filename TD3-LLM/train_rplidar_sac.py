@@ -26,24 +26,24 @@ expl_decay_steps = (
     500000  # Number of steps over which the initial exploration noise will decay over
 )
 expl_min = 0.1  # Exploration noise after the decay in range [0...expl_noise]
-batch_size = 40  # Size of the mini-batch
+batch_size = 256  # Size of the mini-batch
 discount = 0.99999  # Discount factor to calculate the discounted future reward (should be close to 1)
 tau = 0.005  # Soft target update variable (should be close to 0)
 policy_noise = 0.2  # Added noise for exploration
 noise_clip = 0.5  # Maximum clamping values of the noise
 policy_freq = 2  # Frequency of Actor network updates
 buffer_size = 1e6  # Maximum size of the buffer
-name = "SAC_velodyne"  # name of the file to store the policy
+name = "SAC_rplidar"  # name of the file to store the policy
 save_model = True  # Weather to save the model or not
 load_model = False  # Weather to load a stored model
 random_near_obstacle = True  # To take random actions near obstacles or not
-reward_type = 'sparse'  # Reward type, sparse or dense
+reward_type = 'hybird'  # Reward type, sparse or dense
 env_name = "RplidarEnv"  # Environment name
 # from velodyne_env_maze import GazeboEnv
-# from rplidar_env import GazeboEnv
+from rplidar_env import GazeboEnv
 # from rplidar_env_maze import GazeboEnv
 # from rplidar_env_distance import GazeboEnv
-from rplidar_env_sparse import GazeboEnv
+# from rplidar_env_sparse import GazeboEnv
 use_LLM_HER = False # Weather to use LLM HER or not
 feedback_form = 'goal'  # Feedback form for the HER algorithm
 from gpt_feedback import GoalPredictor
@@ -51,14 +51,16 @@ use_HER = False  # Weather to use HER or not
 from replay_buffer import ReplayBuffer
 # from replay_buffer_PER import ReplayBuffer
 # from replay_buffer_her import ReplayBuffer
-lr = 0.001  # Learning rate for the networks
+lr = 0.00005  # Learning rate for the networks
 alpha = 0.2  # Alpha value for the SAC algorithm
+hidden_dim = 500
 
 
-file_name = '{}_{}_{}_{}_{}_{}_{}'.format(name, reward_type, feedback_form, env_name,
+file_name = '{}_{}_{}_{}_{}_{}_{}_{}_{}_{}'.format(name, reward_type, feedback_form if use_LLM_HER else "", env_name,batch_size,lr, hidden_dim,
                                                     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), 
                                                     "HER" if use_HER else "", 
                                                     "LLM_HER" if use_LLM_HER else "")
+result_path = './runs/' + file_name
 result_path = './runs/' + file_name
 writer = SummaryWriter(result_path)
 
@@ -194,16 +196,16 @@ class QNetwork(nn.Module):
 
 
 class SAC(object):
-    def __init__(self, state_dim, action_dim, alpha=0.2, hidden_dim=800, lr = 0.00005):
+    def __init__(self, state_dim, action_dim, alpha=0.2, hidden_dim=256, lr = 0.00005):
         # Actor and Critic networks
         # self.max_action = max_action
         self.iter_count = 0
         self.alpha = alpha
 
-        self.critic = QNetwork(state_dim, action_dim).to(device)
+        self.critic = QNetwork(state_dim, action_dim, hidden_dim).to(device)
         self.critic_optim = Adam(self.critic.parameters(), lr=lr)
 
-        self.critic_target = QNetwork(state_dim, action_dim).to(device)
+        self.critic_target = QNetwork(state_dim, action_dim, hidden_dim).to(device)
         self.hard_update(self.critic_target, self.critic)
 
         self.target_entropy = -torch.prod(torch.Tensor(action_dim).to(device)).item()
@@ -342,10 +344,10 @@ np.random.seed(seed)
 state_dim = environment_dim + robot_dim
 action_dim = 2
 max_action = 1
-hidden_dim = 256
+
 
 # Create the network
-network = SAC(state_dim, action_dim, alpha, hidden_dim, lr)
+network = SAC(state_dim, action_dim)
 # Create a replay buffer
 replay_buffer = ReplayBuffer(buffer_size, seed)
 if load_model:

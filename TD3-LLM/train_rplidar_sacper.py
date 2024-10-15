@@ -6,6 +6,7 @@ import torch
 from torch.optim import Adam
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 from torch.distributions import Normal
 from numpy import inf
 import datetime
@@ -18,7 +19,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # cuda or
 seed = 1  # Random seed number
 eval_freq = 1e3  # After how many steps to perform the evaluation
 start_steps = 1e4  # Number of steps to perform the evaluation
-max_ep = 1000  # maximum number of steps per episode
+max_ep = 500  # maximum number of steps per episode
 eval_ep = 10  # number of episodes for evaluation
 max_timesteps = 5e5  # Maximum number of steps to perform
 expl_noise = 1  # Initial exploration noise starting value in range [expl_min ... 1]
@@ -26,14 +27,14 @@ expl_decay_steps = (
     500000  # Number of steps over which the initial exploration noise will decay over
 )
 expl_min = 0.1  # Exploration noise after the decay in range [0...expl_noise]
-batch_size = 40  # Size of the mini-batch
+batch_size = 256 # Size of the mini-batch
 discount = 0.99999  # Discount factor to calculate the discounted future reward (should be close to 1)
 tau = 0.005  # Soft target update variable (should be close to 0)
 policy_noise = 0.2  # Added noise for exploration
 noise_clip = 0.5  # Maximum clamping values of the noise
 policy_freq = 2  # Frequency of Actor network updates
 buffer_size = 1000000  # Maximum size of the buffer
-name = "SAC_rplidar"  # name of the file to store the policy
+name = "SAC_proportional_pathquality"  # name of the file to store the policy
 save_model = True  # Weather to save the model or not
 load_model = False  # Weather to load a stored model
 random_near_obstacle = True  # To take random actions near obstacles or not
@@ -48,19 +49,23 @@ use_LLM_HER = False # Weather to use LLM HER or not
 curriculum_steps = 150  # Number of steps to perform the HER algorithm
 feedback_form = 'goal'  # Feedback form for the HER algorithm
 from gpt_feedback import GoalPredictor
-use_HER = False  # Weather to use HER or not
-use_PER_HER = True  # Weather to use PER HER or not
+use_HER = False  # Whether to use HER or not
+use_TDPER = True  # Whether to use PER HER or not
+use_PQPER = False  # Whether to use PQPER or not
+use_PPER = False  # Whether to use PPER or not
 # from replay_buffer import ReplayBuffer
-from replay_buffer_PER import ReplayBuffer
+# from replay_buffer_PER import ReplayBuffer
 # from replay_buffer_her import ReplayBuffer
-lr = 0.001  # Learning rate for the networks
-alpha = 0.2  # Alpha value for the SAC algorithm
-
-
-file_name = '{}_{}_{}_{}_{}_{}_{}_{}_{}'.format(name, reward_type, feedback_form if use_LLM_HER else "", env_name,
+# from replay_buffer_PQPER import ReplayBuffer, Trajectory
+# from replay_buffer_PPER import ReplayBuffer
+from replay_buffer_PQPER import ReplayBuffer
+lr = 0.00005  # Learning rate for the networks
+alpha = 0.2  # Alpha value for the SAC algorithm 
+hidden_dim = 500
+file_name = '{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}'.format(name, reward_type, feedback_form if use_LLM_HER else "", env_name,batch_size,lr, hidden_dim,
                                                     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), 
                                                     "HER" if use_HER else "", 
-                                                    "LLM_HER" if use_LLM_HER else "", curriculum_steps if use_LLM_HER else "","PER_HER" if use_PER_HER else "")
+                                                    "LLM_HER" if use_LLM_HER else "", curriculum_steps if use_LLM_HER else "","PER_HER" if use_TDPER else "", "PQPER" if use_PQPER else "", "PPER" if use_PPER else "")
 result_path = './runs/' + file_name
 writer = SummaryWriter(result_path)
 
@@ -196,16 +201,16 @@ class QNetwork(nn.Module):
 
 
 class SAC(object):
-    def __init__(self, state_dim, action_dim, alpha=0.2, hidden_dim=800, lr = 0.00005):
+    def __init__(self, state_dim, action_dim, alpha=0.2, hidden_dim=800, lr = 0.001):
         # Actor and Critic networks
         # self.max_action = max_action
         self.iter_count = 0
         self.alpha = alpha
 
-        self.critic = QNetwork(state_dim, action_dim).to(device)
+        self.critic = QNetwork(state_dim, action_dim, hidden_dim).to(device)
         self.critic_optim = Adam(self.critic.parameters(), lr=lr)
 
-        self.critic_target = QNetwork(state_dim, action_dim).to(device)
+        self.critic_target = QNetwork(state_dim, action_dim, hidden_dim).to(device)
         self.hard_update(self.critic_target, self.critic)
 
         self.target_entropy = -torch.prod(torch.Tensor(action_dim).to(device)).item()
@@ -214,6 +219,14 @@ class SAC(object):
 
         self.policy = GaussianPolicy(state_dim, action_dim, hidden_dim).to(device)
         self.policy_optim = Adam(self.policy.parameters(), lr=lr)
+
+        # # 使用 StepLR 调度器，每隔 50 次迭代将学习率下降0.8倍
+        # self.critic_scheduler = StepLR(self.critic_optim, step_size=50, gamma=0.8)
+        # self.policy_scheduler = StepLR(self.policy_optim, step_size=50, gamma=0.8)
+
+        # # 使用 ReduceLROnPlateau 调度器
+        # self.critic_scheduler = ReduceLROnPlateau(self.critic_optim, mode='min', factor=0.8, patience=10)
+        # self.policy_scheduler = ReduceLROnPlateau(self.policy_optim, mode='min', factor=0.8, patience=10)
 
     def hard_update(self, target, source):
         for target_param, param in zip(target.parameters(), source.parameters()):
@@ -232,7 +245,7 @@ class SAC(object):
         return action.detach().cpu().numpy()[0]
 
 
-    def train(self, replay_buffer, iterations, batch_size=100, discount=0.99, tau=0.005):
+    def train(self, replay_buffer, iterations, batch_size=100, discount=0.99, tau=0.005, progress=0):
         av_Q = 0
         max_Q = -inf
         av_loss = 0
@@ -247,7 +260,7 @@ class SAC(object):
                 batch_next_states,
                 batch_is_weights,
                 idxes,
-            ) = replay_buffer.sample_batch(batch_size)
+            ) = replay_buffer.sample_batch(batch_size, progress)
             state = torch.Tensor(batch_states).to(device)
             next_state = torch.Tensor(batch_next_states).to(device)
             action = torch.Tensor(batch_actions).to(device)
@@ -279,6 +292,11 @@ class SAC(object):
             # qf1_loss = F.mse_loss(qf1, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
             # qf2_loss = F.mse_loss(qf2, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
             qf_loss = qf1_loss + qf2_loss
+                
+            # qf1, qf2 = self.critic(state, action)  # Two Q-functions to mitigate positive bias in the policy improvement step
+            # qf1_loss = F.mse_loss(qf1, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+            # qf2_loss = F.mse_loss(qf2, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+            # qf_loss = qf1_loss + qf2_loss
 
             # print(type(idxes[0]))
             # print(type(td_error.detach().cpu().numpy().squeeze()))  # 输出类型
@@ -287,6 +305,9 @@ class SAC(object):
             self.critic_optim.zero_grad()
             qf_loss.backward()
             self.critic_optim.step()
+            # self.critic_scheduler.step()
+            # 根据验证损失更新学习率
+            # self.critic_scheduler.step(qf1_loss)  # 或者使用其他验证损失
 
             pi, log_pi, _ = self.policy.sample(state)
 
@@ -297,12 +318,16 @@ class SAC(object):
 
             policy_loss = td_error_policy.mean() # Jπ = 𝔼st∼D,εt∼N[α * logπ(f(εt;st)|st) − Q(st,f(εt;st))]
 
-            td_error = abs(((td_error_qf1 + td_error_qf2) / 6.0 + td_error_policy + 1e-5).squeeze())
-            replay_buffer.update_priorities(idxes,td_error.detach().cpu().numpy().squeeze())
+            if use_TDPER:
+                td_error = abs(((td_error_qf1 + td_error_qf2) / 6.0 + td_error_policy + 1e-5).squeeze())
+                replay_buffer.update_priorities(idxes,td_error.detach().cpu().numpy().squeeze())
 
             self.policy_optim.zero_grad()
             policy_loss.backward()
             self.policy_optim.step()
+            # 更新学习率
+            # self.policy_scheduler.step()
+            # self.policy_scheduler.step(policy_loss)  # 或者使用其他验证损失
 
             # alpha_loss = -(self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
 
@@ -368,7 +393,7 @@ np.random.seed(seed)
 state_dim = environment_dim + robot_dim
 action_dim = 2
 max_action = 1
-hidden_dim = 256
+
 
 # Create the network
 network = SAC(state_dim, action_dim, alpha, hidden_dim, lr)
@@ -410,15 +435,19 @@ predictor = GoalPredictor(api_base, api_key, deployment_name, api_version)
 # Begin the training loop
 while timestep < max_timesteps:
 
+    progress = timestep / max_timesteps
     # On termination of episode
     if done:
         if timestep != 0:
+            if use_PPER:
+                replay_buffer.add_trajectory(traj)
             network.train(
                 replay_buffer,
                 episode_timesteps,
                 batch_size,
                 discount,
                 tau,
+                progress,
             )
 
         if (timesteps_since_eval >= eval_freq) and (timestep >= start_steps):
@@ -482,6 +511,8 @@ while timestep < max_timesteps:
                     writer.add_scalar('train/goal_distance', distance, episode_num)
                     init_state, _, _, _, _, _, init_odom_x, init_odom_y, init_angel, _, _, _ = replay_buffer.get_last_episode(0)
                     new_state, _, _ = env.calculate_reward_and_state(init_state, init_odom_x, init_odom_y, init_angel, new_goal_x, new_goal_y)
+                    if use_PPER:
+                        traj = Trajectory(new_state)
                     for i in range(1, episode_timesteps):
                         # 获取当前 episode 的 transition
                         # print('start:', replay_buffer.episode_start_indices)
@@ -502,11 +533,19 @@ while timestep < max_timesteps:
                         # 更新 replay buffer 中的 transition
                         # replay_buffer.update_last_episode(i, new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, goal_x, goal_y)
 
-                        max_priority = replay_buffer._get_max_priority()
+                        
 
-                        replay_buffer.add(new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y, max_priority)
+                        if use_PPER:
+                            traj.add(new_next_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
+                        elif use_PER_HER:
+                            max_priority = replay_buffer._get_max_priority()
+                            replay_buffer.add(new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y, max_priority)
+                        else:
+                            replay_buffer.add(new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
                         new_state = new_next_state
                         if new_done:
+                            if use_PPER:
+                                replay_buffer.add_trajectory()
                             break
 
         
@@ -515,6 +554,9 @@ while timestep < max_timesteps:
         angle_squence = []
         odom_state_sequence = []
         state, info = env.reset()
+
+        if use_PPER:
+            traj = Trajectory(state)
         # print('shape:', np.shape(state))
         #print(state)
         done = False
@@ -576,9 +618,11 @@ while timestep < max_timesteps:
         collision = False
 
     # Save the tuple in replay buffer
-    if use_PER_HER:
+    if use_TDPER:
         max_priority = replay_buffer._get_max_priority()
         replay_buffer.add(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'], info['angle'], info["goal_x"], info["goal_y"], max_priority)
+    elif use_PPER:
+        traj.store_step(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'], info['angle'], info["goal_x"], info["goal_y"])
     else:
         replay_buffer.add(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'] , info['angle'], info["goal_x"], info["goal_y"])
 
