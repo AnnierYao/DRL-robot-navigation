@@ -66,8 +66,6 @@ class SumTree:
     
 
 
-
-
 class ReplayBuffer(object):
     def __init__(self, buffer_size, random_seed=123, alpha=0.4,beta=0.4):
         """
@@ -112,7 +110,9 @@ class ReplayBuffer(object):
             self.total_distance = state[-4]
             self.new_flag = False
         
-        delta_distance = (state[-4] - next_state[-4]) / self.total_distance
+        # delta_distance = (state[-4] - next_state[-4]) / self.total_distance
+        delta_distance = (state[-4] - next_state[-4]) / state[-4]
+        safty = np.min(next_state[:-5]) - 0.5
         # delta_theta = np.abs(state[-3] - next_state[-3]) / np.pi
         # delta_theta = next_state[-3]
         # obstacle_distance = np.min(next_state[:-5])
@@ -123,7 +123,7 @@ class ReplayBuffer(object):
 
         # sigmoid_progress = self.sigmoid(delta_distance) + self.sigmoid(delta_theta, scale=0.5) - self.sigmoid(penalty, scale=2)
         # sigmoid_progress = self.sigmoid(delta_distance) - self.sigmoid(penalty, scale=2)
-        sigmoid_progress = self.sigmoid(delta_distance)
+        sigmoid_progress = 0.5 * self.sigmoid(delta_distance, scale=2) + 0.5 * self.sigmoid(safty)
 
         # print(delta_distance, sigmoid_progress)
 
@@ -163,6 +163,30 @@ class ReplayBuffer(object):
         if done:  # 如果当前 experience 标志 episode 结束
             self.episode_start_indices.append(self.current_episode_start_idx)
             self.current_episode_start_idx = self.count  # 更新为下一个 episode 的起始位置
+
+    # def add(self, experiences, success):
+
+    #     for i in range(len(experiences)):
+    #         experience = experiences[i]
+        
+    #     experience = (state, action, reward, terminate, done, next_state, odom_x, odom_y, angle, goal_x, goal_y)
+    #     # self.sum_tree.add(max_priority, experience)
+    #     # self.count += 1
+        
+    #     if self.count < self.buffer_size:
+    #         # self.buffer.append(experience)
+    #         # self.sum_tree.add(max_priority, experience)
+    #         self.sum_tree.add(max_priority, experience)
+    #         self.count += 1
+    #     else:
+    #         # self.buffer.popleft()
+    #         # self.buffer.append(experience)
+    #         self.sum_tree.add(max_priority, experience)
+    #         # self.sum_tree.add(max_priority, experience)
+
+    #     if done:  # 如果当前 experience 标志 episode 结束
+    #         self.episode_start_indices.append(self.current_episode_start_idx)
+    #         self.current_episode_start_idx = self.count  # 更新为下一个 episode 的起始位置
     
     def _get_max_priority(self):
         # try:

@@ -21,7 +21,7 @@ eval_freq = 1e3  # After how many steps to perform the evaluation
 start_steps = 1e4  # Number of steps to perform the evaluation
 max_ep = 500  # maximum number of steps per episode
 eval_ep = 10  # number of episodes for evaluation
-max_timesteps = 5e5  # Maximum number of steps to perform
+max_timesteps = 8e5  # Maximum number of steps to perform
 expl_noise = 1  # Initial exploration noise starting value in range [expl_min ... 1]
 expl_decay_steps = (
     500000  # Number of steps over which the initial exploration noise will decay over
@@ -34,8 +34,8 @@ policy_noise = 0.2  # Added noise for exploration
 noise_clip = 0.5  # Maximum clamping values of the noise
 policy_freq = 2  # Frequency of Actor network updates
 buffer_size = 1000000  # Maximum size of the buffer
-name = "SAC_proportional_pathquality"  # name of the file to store the policy
-save_model = True  # Weather to save the model or not
+name = "SAC_rplidar_mixed"  # name of the file to store the policy
+save_model = True # Weather to save the model or not
 load_model = False  # Weather to load a stored model
 random_near_obstacle = True  # To take random actions near obstacles or not
 reward_type = 'hybird'  # Reward type, sparse or dense
@@ -50,8 +50,8 @@ curriculum_steps = 150  # Number of steps to perform the HER algorithm
 feedback_form = 'goal'  # Feedback form for the HER algorithm
 from gpt_feedback import GoalPredictor
 use_HER = False  # Whether to use HER or not
-use_TDPER = True  # Whether to use PER HER or not
-use_PQPER = False  # Whether to use PQPER or not
+use_TDPER = False  # Whether to use PER HER or not
+use_PQPER = True # Whether to use PQPER or not
 use_PPER = False  # Whether to use PPER or not
 # from replay_buffer import ReplayBuffer
 # from replay_buffer_PER import ReplayBuffer
@@ -65,7 +65,7 @@ hidden_dim = 500
 file_name = '{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}'.format(name, reward_type, feedback_form if use_LLM_HER else "", env_name,batch_size,lr, hidden_dim,
                                                     datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), 
                                                     "HER" if use_HER else "", 
-                                                    "LLM_HER" if use_LLM_HER else "", curriculum_steps if use_LLM_HER else "","PER_HER" if use_TDPER else "", "PQPER" if use_PQPER else "", "PPER" if use_PPER else "")
+                                                    "LLM_HER" if use_LLM_HER else "", curriculum_steps if use_LLM_HER else "","TDPER" if use_TDPER else "", "PQPER" if use_PQPER else "", "PPER" if use_PPER else "")
 result_path = './runs/' + file_name
 writer = SummaryWriter(result_path)
 
@@ -158,11 +158,16 @@ class GaussianPolicy(nn.Module):
         y_t = torch.tanh(x_t)
         action = y_t * self.action_scale + self.action_bias
         log_prob = normal.log_prob(x_t)
+
         # Enforcing Action Bound
         log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + epsilon)
         log_prob = log_prob.sum(1, keepdim=True)
+
+        # 计算动作熵 H(π(s))
+        entropy = normal.entropy().sum(1, keepdim=True)
+
         mean = torch.tanh(mean) * self.action_scale + self.action_bias
-        return action, log_prob, mean
+        return action, log_prob, mean, entropy
 
     def to(self, device):
         self.action_scale = self.action_scale.to(device)
@@ -239,9 +244,9 @@ class SAC(object):
     def get_action(self, state):
         state = torch.FloatTensor(state).to(device).unsqueeze(0)
         if evaluate is False:
-            action, _, _ = self.policy.sample(state)
+            action, _, _, _ = self.policy.sample(state)
         else:
-            _, _, action = self.policy.sample(state)
+            _, _, action, _ = self.policy.sample(state)
         return action.detach().cpu().numpy()[0]
 
 
@@ -250,6 +255,10 @@ class SAC(object):
         max_Q = -inf
         av_loss = 0
         av_alpha_loss = 0
+        av_entropy = 0
+        av_alpha = 0
+        av_td_error = 0
+        av_delta_distance = 0
         for it in range(iterations):
             # Sample a batch from the replay buffer
             (
@@ -269,13 +278,12 @@ class SAC(object):
             is_weights = torch.Tensor(batch_is_weights).to(device)
 
             with torch.no_grad():
-                next_state_action, next_state_log_pi, _ = self.policy.sample(next_state)
+                next_state_action, next_state_log_pi, _, _ = self.policy.sample(next_state)
                 qf1_next_target, qf2_next_target = self.critic_target(next_state, next_state_action)
                 min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
                 next_q_value = reward + (1-done) * discount * (min_qf_next_target)
                 av_Q += torch.mean(min_qf_next_target)
                 max_Q = max(max_Q, torch.max(min_qf_next_target))
-
             
             qf1, qf2 = self.critic(state, action)  # Two Q-functions to mitigate positive bias in the policy improvement step
             # 计算 TD 误差
@@ -309,7 +317,7 @@ class SAC(object):
             # 根据验证损失更新学习率
             # self.critic_scheduler.step(qf1_loss)  # 或者使用其他验证损失
 
-            pi, log_pi, _ = self.policy.sample(state)
+            pi, log_pi, _, entropy = self.policy.sample(state)
 
             qf1_pi, qf2_pi = self.critic(state, pi)
             min_qf_pi = torch.min(qf1_pi, qf2_pi)
@@ -322,6 +330,39 @@ class SAC(object):
                 td_error = abs(((td_error_qf1 + td_error_qf2) / 6.0 + td_error_policy + 1e-5).squeeze())
                 replay_buffer.update_priorities(idxes,td_error.detach().cpu().numpy().squeeze())
 
+            if use_PQPER:
+                # alpha = torch.sigmoid(torch.tensor(entropy - entropy_threshold))
+                # alpha = torch.sigmoid((entropy - 1).clone().detach()).item()  # 使用 .item() 获取标量
+                
+                alpha = torch.sigmoid(entropy.mean() - 0.5).item()  # 使用 .item() 获取标量
+                # 计算当前策略的熵
+                # 计算 delta_distance
+                state_distances_to_goal = state[:, -4]  # 取出 state[-4] 距离
+                next_state_distances_to_goal = next_state[:, -4]  # 取出 next_state[-4] 距离
+                # delta_distances = (state_distances_to_goal - next_state_distances_to_goal) / (state_distances_to_goal + 1e-6)
+                delta_distances = state_distances_to_goal - next_state_distances_to_goal
+
+                # # 计算 safty
+                # min_laser_distances = torch.min(next_state[:, :-5], dim=1).values  # next_state[:-5] 的最小值
+                # safties = min_laser_distances - 0.5  # 安全性计算
+
+                # 计算TD error
+                td_error = abs(((td_error_qf1 + td_error_qf2) / 6.0 + td_error_policy + 1e-5).squeeze())
+
+                # Sigmoid 函数应用
+                delta_sigmoid = torch.sigmoid(10 * delta_distances) 
+                # safty_sigmoid = torch.sigmoid(safties)
+                td_error_sigmoid = torch.sigmoid(td_error)
+
+                # 自适应优先级计算
+                # priorities = alpha * delta_sigmoid + (1 - alpha) * safty_sigmoid
+                priorities = alpha * td_error_sigmoid + (1 - alpha) * delta_sigmoid
+                # print('entropy:', entropy.mean().item(), 'alpha:', alpha, 'td_error_sigmoid:', td_error_sigmoid.mean().item(), 'delta_sigmoid:', delta_sigmoid.mean().item())
+                av_entropy += entropy.mean().item()
+                av_alpha += alpha
+                av_td_error += td_error_sigmoid.mean().item()
+                av_delta_distance += delta_sigmoid.mean().item()
+                replay_buffer.update_priorities(idxes,priorities.detach().cpu().numpy().squeeze())
             self.policy_optim.zero_grad()
             policy_loss.backward()
             self.policy_optim.step()
@@ -351,6 +392,12 @@ class SAC(object):
         writer.add_scalar('loss/critic_1', qf1_loss.item(), self.iter_count)
         writer.add_scalar('loss/critic_2', qf2_loss.item(), self.iter_count)
         writer.add_scalar('loss/avg_entropy_loss', av_alpha_loss/iterations, self.iter_count)
+
+        writer.add_scalar('entropy/avg_entropy', av_entropy/iterations, self.iter_count)
+        writer.add_scalar('entropy/avg_alpha', av_alpha/iterations, self.iter_count)
+        writer.add_scalar('entropy/avg_td_error', av_td_error/iterations, self.iter_count)
+        writer.add_scalar('entropy/avg_delta_distance', av_delta_distance/iterations, self.iter_count)
+
         # writer.add_scalar('entropy_temprature/alpha', alpha_tlogs.item(), self.iter_count)
 
     def save(self, filename, directory):
@@ -438,7 +485,7 @@ while timestep < max_timesteps:
     progress = timestep / max_timesteps
     # On termination of episode
     if done:
-        if timestep != 0:
+        if timestep >2:
             if use_PPER:
                 replay_buffer.add_trajectory(traj)
             network.train(
@@ -537,7 +584,7 @@ while timestep < max_timesteps:
 
                         if use_PPER:
                             traj.add(new_next_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y)
-                        elif use_PER_HER:
+                        elif use_TDPER:
                             max_priority = replay_buffer._get_max_priority()
                             replay_buffer.add(new_state, old_action, new_reward, new_done_bool, new_done, new_next_state, odom_x, odom_y, angle, new_goal_x, new_goal_y, max_priority)
                         else:
@@ -623,6 +670,9 @@ while timestep < max_timesteps:
         replay_buffer.add(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'], info['angle'], info["goal_x"], info["goal_y"], max_priority)
     elif use_PPER:
         traj.store_step(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'], info['angle'], info["goal_x"], info["goal_y"])
+    elif use_PQPER:
+        max_priority = replay_buffer._get_max_priority()
+        replay_buffer.add(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'] , info['angle'], info["goal_x"], info["goal_y"], max_priority)
     else:
         replay_buffer.add(state, action, reward, done_bool, done, next_state, info['odom_x'], info['odom_y'] , info['angle'], info["goal_x"], info["goal_y"])
 

@@ -63,7 +63,7 @@ class ReplayBuffer(object):
         return self.count
 
    
-    def sample_batch(self, batch_size):
+    def sample_batch(self, batch_size, progress):
         batch = []
 
         sampling_probabilities = np.array(self.tree.values)/self.tree.value_sum

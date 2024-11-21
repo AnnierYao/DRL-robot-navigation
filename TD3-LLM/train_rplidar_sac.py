@@ -20,7 +20,7 @@ eval_freq = 1e3  # After how many steps to perform the evaluation
 start_steps = 1e4  # Number of steps to perform the evaluation
 max_ep = 500  # maximum number of steps per episode
 eval_ep = 10  # number of episodes for evaluation
-max_timesteps = 5e5  # Maximum number of steps to perform
+max_timesteps = 8e5  # Maximum number of steps to perform
 expl_noise = 1  # Initial exploration noise starting value in range [expl_min ... 1]
 expl_decay_steps = (
     500000  # Number of steps over which the initial exploration noise will decay over
@@ -33,7 +33,7 @@ policy_noise = 0.2  # Added noise for exploration
 noise_clip = 0.5  # Maximum clamping values of the noise
 policy_freq = 2  # Frequency of Actor network updates
 buffer_size = 1e6  # Maximum size of the buffer
-name = "SAC_rplidar"  # name of the file to store the policy
+name = "SAC_rplidar_walls"  # name of the file to store the policy
 save_model = True  # Weather to save the model or not
 load_model = False  # Weather to load a stored model
 random_near_obstacle = True  # To take random actions near obstacles or not
